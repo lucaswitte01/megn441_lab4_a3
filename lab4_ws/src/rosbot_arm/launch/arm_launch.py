@@ -58,11 +58,6 @@ def generate_launch_description():
                 executable='arm_control',
                 name='arm_control')
     
-    teleop_arm_control_node = Node(
-        package='rosbot',
-        executable='teleop_arm_control',
-        name='teleop_arm_control')
-    
     ik_node = Node(
                 package='rosbot_arm',
                 executable='ik_node',
@@ -79,7 +74,6 @@ def generate_launch_description():
         rviz,
         arm_control_node,
         ik_node,
-        teleop_arm_control_node,
     ])
 
 
