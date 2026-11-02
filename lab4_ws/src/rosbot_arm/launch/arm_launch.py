@@ -13,7 +13,7 @@ def generate_launch_description():
     orbbec_pkg_path = get_package_share_directory('orbbec_camera')
     rviz_pkg_path = get_package_share_directory('rviz2')
     rosbot_arm_pkg_path = get_package_share_directory('rosbot_arm')
-    laser_filters_config = os.path.join(rosbot_arm_pkg_path, 'lidar_filters_config_a1.yaml')
+    laser_filters_config = os.path.join(rosbot_arm_pkg_path, 'launch/lidar_filters_config_a1.yaml')
 
     # TODO: Launch your sllidar_node, adding parameters options
     sllidar_node = Node(
@@ -71,7 +71,7 @@ def generate_launch_description():
         sllidar_node,
         dabai_launch,
         laser_filter_node,
-        rviz,
+        # rviz,
         arm_control_node,
         ik_node,
     ])
