@@ -5,7 +5,7 @@ from rclpy.node import Node
 from enum import Enum
 from rclypy.action import ActionClient
 from nav2_masgs.action import NavigateToPose
-
+from math import math    
 # An enum allows you to use words instead of arbitrary
 # numbers to represent your states
 class State(Enum):
@@ -15,12 +15,13 @@ class State(Enum):
     PLACE = 4
     # You can add other states to represent other behaviors
     DONE = 5 # Temporarily added NEXT as a state
+    FAILED = 6
 
 class NavManager(Node):
     def __init__(self):
         super().__init__('nav_manager')
         self.state = State.INIT # Initialize internal variable to represent state
-
+        
         # The timer calls the timer_callback function 10 times a second.
         self.timer = self.create_timer(0.1, self.timer_callback)
         # Add subscribers, publishers, action clients, etc. in __init__
@@ -30,7 +31,8 @@ class NavManager(Node):
         self.declare_parameter('goal_position', [0.0, 0.0, 0.0])
         self.declare_parameter('block_position', [0.2, 0.0, 0.0])
 
-        goal_pos = self.get_parameter('goal_position').value
+        self.goal_pos = self.get_parameter('goal_position').value
+        self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         block_pos = self.get_parameter('block_position').value
 
         # Keep track of whether bot is currently busy
@@ -53,10 +55,11 @@ class NavManager(Node):
             self.BUSY = False
 
         elif self.state is State.NAVIGATE:
-            self.send_nav_goal()
-            self.BUSY = True
+            if self.nav_client.server_is_ready():
+                self.send_nav_goal()
+                self.BUSY = True
 
-        elif self.state is State.DONE:
+        elif self.state in (State.DONE, State.FAILED):
             # Mark as finished and quit code
             self.finished = True
 
@@ -66,10 +69,49 @@ class NavManager(Node):
 
     def send_nav_goal(self):
         # Send goal to navigation action server in this function
+        x, y, yaw_deg = self.goal_pos
+        yaw = radians(yaw_deg)
 
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.header.stamp = self.get_clock().now().to_masg()
+        goal.pose.pose.position.x = x
+        goal.pose.pose.position.y = y
+        goal.pose.pose.position.z = sin(yaw/2)
+        goal.pose.pose.position.w = cos(yaw/2)
+        
         # After navigation to target, set the state to whatever comes next
-        # Manager may not be done after sending nav goal 
-        self.state = State.DONE
+        self.BUSY = True
+        future = self.actin_client.send_goal_async(goal)
+        future.add_done_callback(self.on_goal_response)
+        self.get_logger().info('Sent navigation goal')
+
+
+    def on_goal_response(self, future):
+        goal_handle = future.result()
+
+        if not goal_handle.accepted:
+            self.get_logger().error('Nav2 rejected the goal')
+            self.state = State.FAILED
+            self.BUSY = False
+            return
+        self.get_logger().info(Nav2 goal accepted')
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self.on_nav_result)
+
+         # Manager may not be done after sending nav goal 
+    def on_nav_result(self, furture):
+        status = future.result().status
+
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info('Destination reached')
+            self.state = State.DONE
+        else:
+            self.get_logger().error(f'Navigation ended with status {status}')
+            self.state = State.FAILED
+
+        self.BUSY = False
+    
 
 def main():
     rclpy.init()
