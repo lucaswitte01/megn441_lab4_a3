@@ -5,7 +5,8 @@ from rclpy.node import Node
 from enum import Enum
 from rclypy.action import ActionClient
 from nav2_masgs.action import NavigateToPose
-from math import math    
+from math import cos, radians, sin
+from action_msgs.msg import GoalStatus
 # An enum allows you to use words instead of arbitrary
 # numbers to represent your states
 class State(Enum):
@@ -57,7 +58,6 @@ class NavManager(Node):
         elif self.state is State.NAVIGATE:
             if self.nav_client.server_is_ready():
                 self.send_nav_goal()
-                self.BUSY = True
 
         elif self.state in (State.DONE, State.FAILED):
             # Mark as finished and quit code
@@ -74,7 +74,7 @@ class NavManager(Node):
 
         goal = NavigateToPose.Goal()
         goal.pose.header.frame_id = 'map'
-        goal.pose.header.stamp = self.get_clock().now().to_masg()
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
         goal.pose.pose.position.x = x
         goal.pose.pose.position.y = y
         goal.pose.pose.position.z = sin(yaw/2)
@@ -82,7 +82,7 @@ class NavManager(Node):
         
         # After navigation to target, set the state to whatever comes next
         self.BUSY = True
-        future = self.actin_client.send_goal_async(goal)
+        future = self.nav_client.send_goal_async(goal,feedback_callback=self.feedback_callback,)
         future.add_done_callback(self.on_goal_response)
         self.get_logger().info('Sent navigation goal')
 
@@ -95,12 +95,12 @@ class NavManager(Node):
             self.state = State.FAILED
             self.BUSY = False
             return
-        self.get_logger().info(Nav2 goal accepted')
+        self.get_logger().info('Nav2 goal accepted')
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self.on_nav_result)
 
          # Manager may not be done after sending nav goal 
-    def on_nav_result(self, furture):
+    def on_nav_result(self, future):
         status = future.result().status
 
         if status == GoalStatus.STATUS_SUCCEEDED:
@@ -112,6 +112,10 @@ class NavManager(Node):
 
         self.BUSY = False
     
+    def feedback_callback(self, feedback_msg):
+        distance = feedback_msg.feedback.distance_remaining
+        self.get_logger().info(f'Distance remaining: {distance:.2f} m ')
+
 
 def main():
     rclpy.init()
