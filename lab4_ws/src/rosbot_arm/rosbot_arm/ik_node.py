@@ -2,6 +2,8 @@ import rclpy
 import math
 from rclpy.node import Node
 from rosbot_msgs.msg import IK, Num
+from rclpy.action import ActionServer
+from rosbot_msgs.action import Pick, Place
 
 ## Joint Links ##
 # l0 refers to the height of the arm base wrt base_link
@@ -38,6 +40,10 @@ class IKNode(Node):
         super().__init__('ik_node')
         self.sub = self.create_subscription(IK, 'arm_control/arm_assignment', self.assignment_callback, 10)
         self.pub = self.create_publisher(Num, 'arm_control/arm_config', 10)
+        #create action servers
+        #self = object, Pick = name of the message, pick = name, execute_pick = registering name of function
+        self.pick_server = ActionServer(self, Pick, 'pick', self.execute_pick)
+        self.place_server = ActionServer(self, Place, 'place', self.execute_place)
 
     def check_inputs(self, x, y, z, roll, pitch, duration):
         params = {'x': x, 'y': y, 'z': z, 'roll': roll, 'pitch': pitch}
@@ -139,6 +145,21 @@ class IKNode(Node):
         output.pwm = pwms
         output.duration = duration
         self.pub.publish(output)
+
+    def execute_pick(self, goal_handle):
+        x, y, z = goal_handle.request.xyz
+        self.get_logger().info('Pick target: x={x}, y={y}, z={z}')
+
+        result = Pick.Result()
+        result.message = 'Recieved target'
+        goal_handle.abort()
+        return result
+
+    def execute_place(self, goal_handle):
+        x, y, z = goal_handle.request.xyz
+        self.get_logger().info('Place target: x={x}, y={y}, z={z}')
+
+    
 
 def main():
     rclpy.init()
