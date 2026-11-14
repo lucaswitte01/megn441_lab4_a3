@@ -1,9 +1,28 @@
 import rclpy
 import math
+import time
 from rclpy.node import Node
 from rosbot_msgs.msg import IK, Num
 from rclpy.action import ActionServer
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rosbot_msgs.action import Pick, Place
+
+## Pick / place settings ##
+# pitch: 90 = gripper pointing straight down (this node's convention)
+GRAB_OPEN = 0.2      # lower = wider
+GRAB_CLOSED = 0.75
+HOVER = 0.06         # m above the block before descending / after lifting
+PICK_PITCH = 90.0
+ROLL = 0.0
+# Stow pose from the lab handout. Check the pitch sign against this node's
+# convention (90 = down, -90 = up) the first time you run it.
+STOW_XYZ = [0.1, 0.0, 0.24]
+STOW_PITCH = 45.0
+MOVE_TIME = 1.5      # s for big moves
+SLOW_TIME = 1.0      # s for the final approach / lift
+GRIP_TIME = 0.8      # s to open or close the gripper
+SETTLE = 0.2         # extra wait after each move
 
 ## Joint Links ##
 # l0 refers to the height of the arm base wrt base_link
@@ -42,8 +61,13 @@ class IKNode(Node):
         self.pub = self.create_publisher(Num, 'arm_control/arm_config', 10)
         #create action servers
         #self = object, Pick = name of the message, pick = name, execute_pick = registering name of function
-        self.pick_server = ActionServer(self, Pick, 'pick', self.execute_pick)
-        self.place_server = ActionServer(self, Place, 'place', self.execute_place)
+        # Reentrant group + MultiThreadedExecutor (see main) so the arm_assignment
+        # subscriber keeps working while a pick/place is sleeping between moves
+        self.cb_group = ReentrantCallbackGroup()
+        self.pick_server = ActionServer(self, Pick, 'pick', self.execute_pick,
+                                        callback_group=self.cb_group)
+        self.place_server = ActionServer(self, Place, 'place', self.execute_place,
+                                         callback_group=self.cb_group)
 
     def check_inputs(self, x, y, z, roll, pitch, duration):
         params = {'x': x, 'y': y, 'z': z, 'roll': roll, 'pitch': pitch}
@@ -121,50 +145,85 @@ class IKNode(Node):
         pulses.append(int(round(grab * 650)))
         return pulses
 
-    def assignment_callback(self, msg):
-        x = msg.xyz[0]
-        y = msg.xyz[1]
-        z = msg.xyz[2]
-        roll = msg.roll
-        pitch = msg.pitch
-        grab = msg.grab
-        duration = msg.duration
-
-        try:
-            self.check_inputs(x, y, z, roll, pitch, duration)
-            pwms = self.convert_to_pulse(x, y, z, roll, pitch, grab)
-        except ValueError as e:
-            self.get_logger().warn(f'Rejected target x={x:.3f}, y={y:.3f}, z={z:.3f}, '
-                                   f'roll={roll:.1f}, pitch={pitch:.1f}: {e}')
-            return
-        except Exception as e:
-            self.get_logger().error(f'IK failed unexpectedly: {e!r}')
-            return
+    def move(self, xyz, roll, pitch, grab, duration):
+        """Run IK and publish one arm command. Raises ValueError if unreachable."""
+        x, y, z = xyz
+        self.check_inputs(x, y, z, roll, pitch, duration)
+        pwms = self.convert_to_pulse(x, y, z, roll, pitch, grab)
         output = Num()
         output.ids = arm_ids
         output.pwm = pwms
-        output.duration = duration
+        output.duration = float(duration)
         self.pub.publish(output)
+
+    def assignment_callback(self, msg):
+        x, y, z = msg.xyz[0], msg.xyz[1], msg.xyz[2]
+        try:
+            self.move([x, y, z], msg.roll, msg.pitch, msg.grab, msg.duration)
+        except ValueError as e:
+            self.get_logger().warn(f'Rejected target x={x:.3f}, y={y:.3f}, z={z:.3f}, '
+                                   f'roll={msg.roll:.1f}, pitch={msg.pitch:.1f}: {e}')
+        except Exception as e:
+            self.get_logger().error(f'IK failed unexpectedly: {e!r}')
+
+    def run_steps(self, goal_handle, steps, action_type):
+        """Do each (stage name, xyz, pitch, grab, duration) in order, waiting for each.
+        Returns the action Result after calling succeed() or abort()."""
+        result = action_type.Result()
+        feedback = action_type.Feedback()
+        for stage, xyz, pitch, grab, duration in steps:
+            feedback.stage = stage
+            goal_handle.publish_feedback(feedback)
+            self.get_logger().info(f'{stage}: xyz={xyz}, pitch={pitch}, grab={grab}')
+            try:
+                self.move(xyz, ROLL, pitch, grab, duration)
+            except ValueError as e:
+                self.get_logger().error(f'{stage} failed: {e}')
+                goal_handle.abort()
+                result.message = f'{stage} failed: {e}'
+                return result
+            # Topics give no "arrived" signal, so wait out the move's duration
+            time.sleep(duration + SETTLE)
+        goal_handle.succeed()
+        result.message = 'done'
+        return result
 
     def execute_pick(self, goal_handle):
         x, y, z = goal_handle.request.xyz
-        self.get_logger().info('Pick target: x={x}, y={y}, z={z}')
-
-        result = Pick.Result()
-        result.message = 'Recieved target'
-        goal_handle.abort()
-        return result
+        self.get_logger().info(f'Pick target: x={x}, y={y}, z={z}')
+        block = [x, y, z]
+        above = [x, y, z + HOVER]
+        steps = [
+            ('open above block',  above,    PICK_PITCH, GRAB_OPEN,   MOVE_TIME),
+            ('lower to block',    block,    PICK_PITCH, GRAB_OPEN,   SLOW_TIME),
+            ('close gripper',     block,    PICK_PITCH, GRAB_CLOSED, GRIP_TIME),
+            ('lift block',        above,    PICK_PITCH, GRAB_CLOSED, SLOW_TIME),
+            ('stow with block',   STOW_XYZ, STOW_PITCH, GRAB_CLOSED, MOVE_TIME),
+        ]
+        return self.run_steps(goal_handle, steps, Pick)
 
     def execute_place(self, goal_handle):
         x, y, z = goal_handle.request.xyz
-        self.get_logger().info('Place target: x={x}, y={y}, z={z}')
+        self.get_logger().info(f'Place target: x={x}, y={y}, z={z}')
+        target = [x, y, z]
+        above = [x, y, z + HOVER]
+        steps = [
+            ('move above target', above,    PICK_PITCH, GRAB_CLOSED, MOVE_TIME),
+            ('lower block',       target,   PICK_PITCH, GRAB_CLOSED, SLOW_TIME),
+            ('release block',     target,   PICK_PITCH, GRAB_OPEN,   GRIP_TIME),
+            ('back off',          above,    PICK_PITCH, GRAB_OPEN,   SLOW_TIME),
+            ('stow empty',        STOW_XYZ, STOW_PITCH, GRAB_OPEN,   MOVE_TIME),
+        ]
+        return self.run_steps(goal_handle, steps, Place)
 
-    
+
 
 def main():
     rclpy.init()
     ik_node = IKNode()
-    rclpy.spin(ik_node)
+    executor = MultiThreadedExecutor()
+    executor.add_node(ik_node)
+    executor.spin()
     rclpy.shutdown()
 
 if __name__ == '__main__':
