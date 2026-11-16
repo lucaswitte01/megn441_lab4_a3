@@ -17,7 +17,7 @@ PICK_PITCH = 90.0
 ROLL = 0.0
 # Stow pose from the lab handout. Check the pitch sign against this node's
 # convention (90 = down, -90 = up) the first time you run it.
-STOW_XYZ = [0.1, 0.0, 0.24]
+STOW_XYZ = [0.12, 0.0, 0.24]
 STOW_PITCH = 45.0
 MOVE_TIME = 1.5      # s for big moves
 SLOW_TIME = 1.0      # s for the final approach / lift
